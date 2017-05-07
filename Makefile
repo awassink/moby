@@ -39,12 +39,19 @@ DOCKER_MOUNT := $(if $(BIND_DIR),-v "$(CURDIR)/$(BIND_DIR):/go/src/github.com/do
 # Note that `BIND_DIR` will already be set to `bundles` if `DOCKER_HOST` is not set (see above BIND_DIR line), in such case this will do nothing since `DOCKER_MOUNT` will already be set.
 DOCKER_MOUNT := $(if $(DOCKER_MOUNT),$(DOCKER_MOUNT),-v "/go/src/github.com/docker/docker/bundles")
 
+# enable .go-pkg-cache if DOCKER_INCREMENTAL_BINARY and DOCKER_MOUNT (i.e.DOCKER_HOST) are set
+PKGCACHE_DIR := $(if $(PKGCACHE_DIR),$(PKGCACHE_DIR),.go-pkg-cache)
+PKGCACHE_MAP := gopath:/go/pkg goroot-linux_amd64_netgo:/usr/local/go/pkg/linux_amd64_netgo
+DOCKER_MOUNT := $(if $(DOCKER_INCREMENTAL_BINARY),$(DOCKER_MOUNT) $(shell echo $(PKGCACHE_MAP) | sed -E 's@([^ ]*)@-v "$(CURDIR)/$(PKGCACHE_DIR)/\1"@g'),$(DOCKER_MOUNT))
+
 GIT_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null)
 GIT_BRANCH_CLEAN := $(shell echo $(GIT_BRANCH) | sed -e "s/[^[:alnum:]]/-/g")
 DOCKER_IMAGE := docker-dev$(if $(GIT_BRANCH_CLEAN),:$(GIT_BRANCH_CLEAN))
 DOCKER_DOCS_IMAGE := docker-docs$(if $(GIT_BRANCH_CLEAN),:$(GIT_BRANCH_CLEAN))
 
 DOCKER_FLAGS := docker run --rm -i --privileged $(DOCKER_ENVS) $(DOCKER_MOUNT)
+BUILD_APT_MIRROR := $(if $(DOCKER_BUILD_APT_MIRROR),--build-arg APT_MIRROR=$(DOCKER_BUILD_APT_MIRROR))
+export BUILD_APT_MIRROR
 
 # if this session isn't interactive, then we don't want to allocate a
 # TTY, which would fail, but if it is interactive, we do want to attach
@@ -64,8 +71,8 @@ all: build ## validate all checks, build linux binaries, run all tests\ncross bu
 binary: build ## build the linux binaries
 	$(DOCKER_RUN_DOCKER) hack/make.sh binary
 
-build: bundles
-	docker build ${DOCKER_BUILD_ARGS} -t "$(DOCKER_IMAGE)" -f "$(DOCKERFILE)" .
+build: bundles init-go-pkg-cache
+	docker build ${BUILD_APT_MIRROR} ${DOCKER_BUILD_ARGS} -t "$(DOCKER_IMAGE)" -f "$(DOCKERFILE)" .
 
 build-gccgo: bundles
 	docker build ${DOCKER_BUILD_ARGS} -t "$(DOCKER_IMAGE)-gccgo" -f Dockerfile.gccgo .
@@ -90,6 +97,8 @@ docs: ## build the docs
 
 gccgo: build-gccgo ## build the gcc-go linux binaries
 	$(DOCKER_FLAGS) "$(DOCKER_IMAGE)-gccgo" hack/make.sh gccgo
+init-go-pkg-cache:
+	mkdir -p $(shell echo $(PKGCACHE_MAP) | sed -E 's@([^: ]*):[^ ]*@$(PKGCACHE_DIR)/\1@g')
 
 install: ## install the linux binaries
 	KEEPBUNDLE=1 hack/make.sh install-binary
