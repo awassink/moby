@@ -9,13 +9,13 @@
 # docker run -v `pwd`:/go/src/github.com/docker/docker --privileged -i -t docker bash
 #
 # # Run the test suite:
-# docker run --privileged docker hack/make.sh test
+# docker run --privileged docker hack/make.sh test-unit test-integration-cli test-docker-py
 #
 # Note: AppArmor used to mess with privileged mode, but this is no longer
 # the case. Therefore, you don't have to disable it anymore.
 #
 
-FROM aarch64/ubuntu:wily
+FROM aarch64/ubuntu:xenial
 
 # Packaged dependencies
 RUN apt-get update && apt-get install -y \
@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y \
 	bash-completion \
 	btrfs-tools \
 	build-essential \
+	cmake \
 	createrepo \
 	curl \
 	dpkg-sig \
@@ -39,6 +40,7 @@ RUN apt-get update && apt-get install -y \
 	libltdl-dev \
 	libsqlite3-dev \
 	libsystemd-dev \
+	libyaml-dev \
 	mercurial \
 	net-tools \
 	parallel \
@@ -46,14 +48,13 @@ RUN apt-get update && apt-get install -y \
 	python-dev \
 	python-mock \
 	python-pip \
+	python-setuptools \
 	python-websocket \
-	gccgo \
+	golang-go \
+	iproute2 \
+	iputils-ping \
+	vim-common \
 	--no-install-recommends
-
-# Install armhf loader to use armv6 binaries on armv8
-RUN dpkg --add-architecture armhf \
-	&& apt-get update \
-	&& apt-get install -y libc6:armhf
 
 # Get lvm2 source for compiling statically
 ENV LVM2_VERSION 2.02.103
@@ -94,16 +95,28 @@ RUN set -x \
 	&& rm -rf "$SECCOMP_PATH"
 
 # Install Go
-# We don't have official binary tarballs for ARM64, eigher for Go or bootstrap,
-# so we use the official armv6 released binaries as a GOROOT_BOOTSTRAP, and
-# build Go from source code.
-ENV GO_VERSION 1.6.3
-RUN mkdir /usr/src/go && curl -fsSL https://storage.googleapis.com/golang/go${GO_VERSION}.src.tar.gz | tar -v -C /usr/src/go -xz --strip-components=1 \
+# We don't have official binary golang 1.7.5 tarballs for ARM64, eigher for Go or
+# bootstrap, so we use golang-go (1.6) as bootstrap to build Go from source code.
+# We don't use the official ARMv6 released binaries as a GOROOT_BOOTSTRAP, because
+# not all ARM64 platforms support 32-bit mode. 32-bit mode is optional for ARMv8.
+ENV GO_VERSION 1.7.5
+RUN mkdir /usr/src/go && curl -fsSL https://golang.org/dl/go${GO_VERSION}.src.tar.gz | tar -v -C /usr/src/go -xz --strip-components=1 \
 	&& cd /usr/src/go/src \
 	&& GOOS=linux GOARCH=arm64 GOROOT_BOOTSTRAP="$(go env GOROOT)" ./make.bash
 
-ENV PATH /usr/src/go/bin:$PATH
-ENV GOPATH /go:/go/src/github.com/docker/docker/vendor
+ENV PATH /go/bin:/usr/src/go/bin:$PATH
+ENV GOPATH /go
+
+# Dependency for golint
+ENV GO_TOOLS_COMMIT 823804e1ae08dbb14eb807afc7db9993bc9e3cc3
+RUN git clone https://github.com/golang/tools.git /go/src/golang.org/x/tools \
+	&& (cd /go/src/golang.org/x/tools && git checkout -q $GO_TOOLS_COMMIT)
+
+# Grab Go's lint tool
+ENV GO_LINT_COMMIT 32a87160691b3c96046c0c678fe57c5bef761456
+RUN git clone https://github.com/golang/lint.git /go/src/github.com/golang/lint \
+	&& (cd /go/src/github.com/golang/lint && git checkout -q $GO_LINT_COMMIT) \
+	&& go install -v github.com/golang/lint/golint
 
 # Only install one version of the registry, because old version which support
 # schema1 manifests is not working on ARM64, we should skip integration-cli
@@ -118,7 +131,7 @@ RUN set -x \
 	&& rm -rf "$GOPATH"
 
 # Install notary and notary-server
-ENV NOTARY_VERSION v0.3.0
+ENV NOTARY_VERSION v0.4.2
 RUN set -x \
 	&& export GOPATH="$(mktemp -d)" \
 	&& git clone https://github.com/docker/notary.git "$GOPATH/src/github.com/docker/notary" \
@@ -130,11 +143,21 @@ RUN set -x \
 	&& rm -rf "$GOPATH"
 
 # Get the "docker-py" source so we can run their integration tests
-ENV DOCKER_PY_COMMIT 7befe694bd21e3c54bb1d7825270ea4bd6864c13
+ENV DOCKER_PY_COMMIT e2655f658408f9ad1f62abdef3eb6ed43c0cf324
 RUN git clone https://github.com/docker/docker-py.git /docker-py \
 	&& cd /docker-py \
 	&& git checkout -q $DOCKER_PY_COMMIT \
+	&& pip install wheel \
 	&& pip install -r test-requirements.txt
+
+# Install yamllint for validating swagger.yaml
+RUN pip install yamllint==1.5.0
+
+# Install go-swagger for validating swagger.yaml
+ENV GO_SWAGGER_COMMIT c28258affb0b6251755d92489ef685af8d4ff3eb
+RUN git clone https://github.com/go-swagger/go-swagger.git /go/src/github.com/go-swagger/go-swagger \
+	&& (cd /go/src/github.com/go-swagger/go-swagger && git checkout -q $GO_SWAGGER_COMMIT) \
+	&& go install -v github.com/go-swagger/go-swagger/cmd/swagger
 
 # Set user.email so crosbymichael's in-container merge commits go smoothly
 RUN git config --global user.email 'docker-dummy@example.com'
